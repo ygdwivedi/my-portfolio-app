@@ -3,155 +3,174 @@ import pandas as pd
 import plotly.express as px
 import yfinance as yf
 
-# --- PAGE SETUP ---
+# --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Portfolio Command Center", layout="wide")
-
-st.markdown("""
-    <style>
-    .stMetric {
-        background-color: #f0f2f6;
-        padding: 10px;
-        border-radius: 5px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
 st.title("🎛️ Portfolio Command Center")
 
-# --- 1. DATA LOADING & SETUP ---
+# --- 1. SETUP & DATA HANDLING ---
 
-# This function fetches live prices from Yahoo Finance
-@st.cache_data(ttl=300) # Cache data for 5 minutes so it's fast
-def get_live_prices(tickers):
-    if not tickers:
-        return {}
+# Robust function to get prices one by one (Slower but 100% reliable)
+@st.cache_data(ttl=300)
+def get_current_price(ticker):
     try:
-        # Download all tickers at once
-        data = yf.download(tickers, period="1d")['Close'].iloc[-1]
-        return data
-    except Exception as e:
-        st.error(f"Could not fetch prices: {e}")
-        return {}
+        stock = yf.Ticker(ticker)
+        # Get the last 5 days history to be safe
+        history = stock.history(period="5d")
+        if not history.empty:
+            return history['Close'].iloc[-1]
+        return None
+    except:
+        return None
 
-# Default Portfolio (This is your "Permanent" list)
-default_data = [
-    {"Ticker": "NVDA",  "Quantity": 50,   "Avg_Cost": 450.00},
-    {"Ticker": "GOOGL", "Quantity": 100,  "Avg_Cost": 120.00},
-    {"Ticker": "BTC-USD", "Quantity": 0.5, "Avg_Cost": 40000.00}, # Use Yahoo Tickers (BTC-USD)
-    {"Ticker": "META",  "Quantity": 20,   "Avg_Cost": 300.00},
-]
+# Initialize Session State for the dataframe if it doesn't exist
+if 'portfolio_df' not in st.session_state:
+    # Default Starting Data
+    default_data = [
+        {"Ticker": "NVDA",  "Quantity": 50,   "Avg_Cost": 450.00},
+        {"Ticker": "GOOGL", "Quantity": 100,  "Avg_Cost": 120.00},
+        {"Ticker": "BTC-USD", "Quantity": 1.5, "Avg_Cost": 60000.00},
+    ]
+    st.session_state.portfolio_df = pd.DataFrame(default_data)
 
-# --- 2. EDITABLE PORTFOLIO SECTION ---
-with st.expander("📝 Manage Portfolio (Add/Edit Stocks)", expanded=False):
-    st.caption("Edit below. To save permanently, copy the code generated at the bottom.")
-    df_input = pd.DataFrame(default_data)
-    edited_df = st.data_editor(df_input, num_rows="dynamic", use_container_width=True, key="editor")
+# --- 2. SIDEBAR: SAVE & LOAD ---
+with st.sidebar:
+    st.header("💾 Save/Load")
     
-    # "Save" Helper
-    st.write("---")
-    st.write("**Want to save these changes permanently?**")
-    st.write("Copy this list below and paste it into your code in the `default_data` section:")
-    st.code(edited_df.to_dict('records'))
+    # DOWNLOAD BUTTON
+    csv = st.session_state.portfolio_df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="Download Portfolio (CSV)",
+        data=csv,
+        file_name='my_portfolio.csv',
+        mime='text/csv',
+    )
+    
+    # UPLOAD BUTTON
+    uploaded_file = st.file_uploader("Upload Portfolio (CSV)", type="csv")
+    if uploaded_file is not None:
+        try:
+            uploaded_df = pd.read_csv(uploaded_file)
+            # Basic validation
+            if {'Ticker', 'Quantity', 'Avg_Cost'}.issubset(uploaded_df.columns):
+                st.session_state.portfolio_df = uploaded_df
+                st.success("Loaded successfully!")
+            else:
+                st.error("CSV must have columns: Ticker, Quantity, Avg_Cost")
+        except Exception as e:
+            st.error(f"Error loading file: {e}")
 
-# --- 3. FETCH LIVE PRICES ---
-# Get list of unique tickers from the table
-if not edited_df.empty:
-    ticker_list = edited_df['Ticker'].unique().tolist()
-    live_prices = get_live_prices(ticker_list)
-else:
-    live_prices = {}
+# --- 3. MAIN EDITOR ---
+with st.expander("📝 Edit Portfolio (Add/Remove Stocks)", expanded=False):
+    # The Editor updates the Session State directly
+    st.session_state.portfolio_df = st.data_editor(
+        st.session_state.portfolio_df, 
+        num_rows="dynamic", 
+        use_container_width=True,
+        key="main_editor"
+    )
 
-# --- 4. SIMULATION LOOP ---
+df = st.session_state.portfolio_df
+
+# --- 4. THE SIMULATOR ---
 st.divider()
-st.subheader("Live Simulation")
 
-simulated_results = []
-
-# Loop through every stock in your table
-for index, row in edited_df.iterrows():
-    ticker = row['Ticker']
-    qty = row['Quantity']
-    avg_cost = row['Avg_Cost']
+if df.empty:
+    st.warning("Your portfolio is empty! Add stocks in the expander above.")
+else:
+    # Prepare list for the final pie chart
+    simulated_results = []
     
-    # Get Live Price (Fallback to Avg Cost if API fails or ticker is wrong)
-    current_price = live_prices.get(ticker, avg_cost)
-    if isinstance(current_price, pd.Series): # Handle edge case with single result
-        current_price = current_price.item()
+    # MAIN LOOP: Row by Row
+    for index, row in df.iterrows():
+        ticker = str(row['Ticker']).upper().strip() # Clean up ticker name
+        qty = float(row['Quantity'])
+        avg_cost = float(row['Avg_Cost'])
         
-    current_val = current_price * qty
-    current_profit = current_val - (avg_cost * qty)
-
-    # --- THE ROW LAYOUT ---
-    # We create a "Card" for each stock
-    with st.container():
-        c1, c2, c3, c4 = st.columns([1, 2, 2, 2])
+        # 1. Get Price
+        current_price = get_current_price(ticker)
         
-        # COL 1: Ticker Info
-        with c1:
-            st.subheader(ticker)
-            st.caption(f"{qty} Shares")
-        
-        # COL 2: REALITY (The Current Live Stats)
-        with c2:
-            st.metric(
-                label="Current Reality",
-                value=f"${current_price:,.2f}",
-                delta=f"${current_profit:,.0f} Profit"
-            )
+        # Handle invalid tickers
+        if current_price is None:
+            current_price = 0.0
+            price_display = "Error"
+        else:
+            price_display = f"${current_price:,.2f}"
 
-        # COL 3: THE SLIDER
-        with c3:
-            growth_pct = st.slider(
-                f"Simulate {ticker}", 
-                min_value=-100, 
-                max_value=400, 
-                value=0, 
-                step=5,
-                key=f"slide_{index}",
-                label_visibility="collapsed" # Hides label for cleaner look
-            )
-            st.caption(f"Simulate Move: **{growth_pct}%**")
-
-        # COL 4: SIMULATION (The "What If" Stats)
-        with c4:
-            # Math
-            sim_price = current_price * (1 + (growth_pct / 100))
-            sim_val = sim_price * qty
-            sim_profit = sim_val - (avg_cost * qty)
+        # 2. Layout
+        with st.container():
+            # Create a 4-column layout
+            c1, c2, c3, c4 = st.columns([1, 1.5, 2, 1.5])
             
-            # Color logic for the delta
-            delta_color = "normal"
-            if sim_profit > current_profit: delta_color = "normal" # Green (standard)
-            else: delta_color = "inverse" 
+            # --- COL 1: NAME ---
+            with c1:
+                st.subheader(ticker)
+                st.caption(f"{qty} Shares")
 
-            st.metric(
-                label=f"Price at {growth_pct}%",
-                value=f"${sim_price:,.2f}",
-                delta=f"${sim_profit:,.0f} Future Profit"
-            )
+            # --- COL 2: REALITY ---
+            with c2:
+                cur_val = current_price * qty
+                cur_profit = cur_val - (avg_cost * qty)
+                st.metric(
+                    "Current Reality", 
+                    price_display, 
+                    delta=f"{cur_profit:,.0f}"
+                )
+
+            # --- COL 3: SLIDER ---
+            with c3:
+                # Custom slider layout
+                st.write("") # Spacer
+                growth = st.slider(
+                    f"Simulator ({ticker})", -100, 400, 0, step=10, 
+                    key=f"slide_{index}", 
+                    label_visibility="collapsed"
+                )
+                st.caption(f"Simulate Move: **{growth}%**")
+
+            # --- COL 4: FUTURE ---
+            with c4:
+                sim_price = current_price * (1 + (growth/100))
+                sim_val = sim_price * qty
+                sim_profit = sim_val - (avg_cost * qty)
+                
+                # Check if we are profiting MORE than reality
+                profit_diff = sim_profit - cur_profit
+                
+                st.metric(
+                    f"Price at {growth}%", 
+                    f"${sim_price:,.2f}", 
+                    delta=f"{sim_profit:,.0f}"
+                )
             
-        st.divider()
-        
-        # Save data for the total calculation
-        simulated_results.append({
-            "Ticker": ticker,
-            "Market_Value": sim_val,
-            "Profit": sim_profit
-        })
+            st.divider()
+            
+            # Add to results for Pie Chart
+            simulated_results.append({
+                "Ticker": ticker,
+                "Market Value": sim_val,
+                "Profit": sim_profit
+            })
 
-# --- 5. TOTALS & PIE CHART ---
-if simulated_results:
-    df_sim = pd.DataFrame(simulated_results)
-    total_val = df_sim['Market_Value'].sum()
-    total_profit = df_sim['Profit'].sum()
+    # --- 5. TOTALS & PIE CHART ---
+    st.header("🎯 Final Projection")
     
-    # Sticky header at the bottom or top for totals
-    st.markdown("### 🎯 Projected Totals")
-    t1, t2 = st.columns(2)
-    t1.metric("Total Simulated Value", f"${total_val:,.0f}")
-    t2.metric("Total Simulated Profit", f"${total_profit:,.0f}")
+    results_df = pd.DataFrame(simulated_results)
     
-    st.write("Allocation based on simulation:")
-    fig = px.pie(df_sim, values='Market_Value', names='Ticker', hole=0.4)
-    fig.update_layout(margin=dict(t=0, b=0, l=0, r=0), height=300)
-    st.plotly_chart(fig, use_container_width=True)
+    if not results_df.empty:
+        total_val = results_df['Market Value'].sum()
+        total_profit = results_df['Profit'].sum()
+        
+        # Big Numbers
+        m1, m2 = st.columns(2)
+        m1.metric("Total Simulated Value", f"${total_val:,.0f}")
+        m2.metric("Total Simulated Profit", f"${total_profit:,.0f}", delta_color="normal")
+        
+        # Pie Chart
+        fig = px.pie(
+            results_df, 
+            values='Market Value', 
+            names='Ticker', 
+            title="Projected Allocation",
+            hole=0.5
+        )
+        st.plotly_chart(fig, use_container_width=True)
