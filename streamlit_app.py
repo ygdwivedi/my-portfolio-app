@@ -7,14 +7,23 @@ import yfinance as yf
 st.set_page_config(page_title="Portfolio Command Center", layout="wide")
 st.title("🎛️ Portfolio Command Center")
 
-# --- 1. SETUP & DATA HANDLING ---
+# --- 1. MEMORY SETUP (Fixes the "Double Entry" Bug) ---
+# We check: "Do we already have data in memory?"
+# If NO, we load the defaults. If YES, we skip this and keep your edits.
+if 'my_portfolio' not in st.session_state:
+    default_data = [
+        {"Ticker": "NVDA",  "Quantity": 50,   "Avg_Cost": 450.00},
+        {"Ticker": "GOOGL", "Quantity": 100,  "Avg_Cost": 120.00},
+        {"Ticker": "BTC-USD", "Quantity": 0.5, "Avg_Cost": 60000.00},
+    ]
+    st.session_state.my_portfolio = pd.DataFrame(default_data)
 
-# Robust function to get prices one by one (Slower but 100% reliable)
-@st.cache_data(ttl=300)
+# --- 2. LIVE PRICE ENGINE ---
+@st.cache_data(ttl=300) # Check for new prices every 5 minutes
 def get_current_price(ticker):
     try:
+        # We fetch history to be safe against market closures
         stock = yf.Ticker(ticker)
-        # Get the last 5 days history to be safe
         history = stock.history(period="5d")
         if not history.empty:
             return history['Close'].iloc[-1]
@@ -22,22 +31,13 @@ def get_current_price(ticker):
     except:
         return None
 
-# Initialize Session State for the dataframe if it doesn't exist
-if 'portfolio_df' not in st.session_state:
-    # Default Starting Data
-    default_data = [
-        {"Ticker": "NVDA",  "Quantity": 50,   "Avg_Cost": 450.00},
-        {"Ticker": "GOOGL", "Quantity": 100,  "Avg_Cost": 120.00},
-        {"Ticker": "BTC-USD", "Quantity": 1.5, "Avg_Cost": 60000.00},
-    ]
-    st.session_state.portfolio_df = pd.DataFrame(default_data)
-
-# --- 2. SIDEBAR: SAVE & LOAD ---
+# --- 3. SIDEBAR: SAVE & LOAD ---
 with st.sidebar:
-    st.header("💾 Save/Load")
+    st.header("💾 Save Your Work")
+    st.info("Download your CSV after editing so you never lose your data.")
     
     # DOWNLOAD BUTTON
-    csv = st.session_state.portfolio_df.to_csv(index=False).encode('utf-8')
+    csv = st.session_state.my_portfolio.to_csv(index=False).encode('utf-8')
     st.download_button(
         label="Download Portfolio (CSV)",
         data=csv,
@@ -50,41 +50,48 @@ with st.sidebar:
     if uploaded_file is not None:
         try:
             uploaded_df = pd.read_csv(uploaded_file)
-            # Basic validation
-            if {'Ticker', 'Quantity', 'Avg_Cost'}.issubset(uploaded_df.columns):
-                st.session_state.portfolio_df = uploaded_df
+            required_cols = {'Ticker', 'Quantity', 'Avg_Cost'}
+            if required_cols.issubset(uploaded_df.columns):
+                st.session_state.my_portfolio = uploaded_df
                 st.success("Loaded successfully!")
+                st.rerun() # Force a refresh to show new data
             else:
                 st.error("CSV must have columns: Ticker, Quantity, Avg_Cost")
         except Exception as e:
             st.error(f"Error loading file: {e}")
 
-# --- 3. MAIN EDITOR ---
-with st.expander("📝 Edit Portfolio (Add/Remove Stocks)", expanded=False):
-    # The Editor updates the Session State directly
-    st.session_state.portfolio_df = st.data_editor(
-        st.session_state.portfolio_df, 
+# --- 4. MAIN EDITOR ---
+with st.expander("📝 Edit Portfolio (Add/Remove Stocks)", expanded=True):
+    # The Editor now talks directly to the "Long Term Memory"
+    edited_df = st.data_editor(
+        st.session_state.my_portfolio, 
         num_rows="dynamic", 
         use_container_width=True,
-        key="main_editor"
+        key="portfolio_editor" 
     )
+    # IMMEDIATELY update the memory with changes
+    if not edited_df.equals(st.session_state.my_portfolio):
+        st.session_state.my_portfolio = edited_df
+        st.rerun()
 
-df = st.session_state.portfolio_df
-
-# --- 4. THE SIMULATOR ---
+# --- 5. THE SIMULATOR ---
 st.divider()
 
-if df.empty:
-    st.warning("Your portfolio is empty! Add stocks in the expander above.")
+if edited_df.empty:
+    st.warning("Your portfolio is empty! Add stocks in the table above.")
 else:
-    # Prepare list for the final pie chart
     simulated_results = []
     
     # MAIN LOOP: Row by Row
-    for index, row in df.iterrows():
-        ticker = str(row['Ticker']).upper().strip() # Clean up ticker name
-        qty = float(row['Quantity'])
-        avg_cost = float(row['Avg_Cost'])
+    for index, row in edited_df.iterrows():
+        # varying input protection
+        ticker = str(row['Ticker']).upper().strip()
+        try:
+            qty = float(row['Quantity'])
+            avg_cost = float(row['Avg_Cost'])
+        except:
+            qty = 0.0
+            avg_cost = 0.0
         
         # 1. Get Price
         current_price = get_current_price(ticker)
@@ -92,7 +99,7 @@ else:
         # Handle invalid tickers
         if current_price is None:
             current_price = 0.0
-            price_display = "Error"
+            price_display = "Error (Check Ticker)"
         else:
             price_display = f"${current_price:,.2f}"
 
@@ -118,8 +125,8 @@ else:
 
             # --- COL 3: SLIDER ---
             with c3:
-                # Custom slider layout
-                st.write("") # Spacer
+                # Spacer to align slider with metrics
+                st.write("") 
                 growth = st.slider(
                     f"Simulator ({ticker})", -100, 400, 0, step=10, 
                     key=f"slide_{index}", 
@@ -132,9 +139,6 @@ else:
                 sim_price = current_price * (1 + (growth/100))
                 sim_val = sim_price * qty
                 sim_profit = sim_val - (avg_cost * qty)
-                
-                # Check if we are profiting MORE than reality
-                profit_diff = sim_profit - cur_profit
                 
                 st.metric(
                     f"Price at {growth}%", 
@@ -151,7 +155,7 @@ else:
                 "Profit": sim_profit
             })
 
-    # --- 5. TOTALS & PIE CHART ---
+    # --- 6. TOTALS & PIE CHART ---
     st.header("🎯 Final Projection")
     
     results_df = pd.DataFrame(simulated_results)
@@ -163,7 +167,7 @@ else:
         # Big Numbers
         m1, m2 = st.columns(2)
         m1.metric("Total Simulated Value", f"${total_val:,.0f}")
-        m2.metric("Total Simulated Profit", f"${total_profit:,.0f}", delta_color="normal")
+        m2.metric("Total Simulated Profit", f"${total_profit:,.0f}")
         
         # Pie Chart
         fig = px.pie(
